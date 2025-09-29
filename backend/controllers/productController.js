@@ -1,5 +1,6 @@
 import asyncHandler from 'express-async-handler'
 import Product from '../models/productModel.js'
+import redisClient from '../config/redis.js'  // nếu dùng cache
 
 // @desc    Fetch all products
 // @route   GET /api/products
@@ -10,10 +11,7 @@ const getProducts = asyncHandler(async (req, res) => {
 
   const keyword = req.query.keyword
     ? {
-        name: {
-          $regex: req.query.keyword,
-          $options: 'i',
-        },
+        name: { $regex: req.query.keyword, $options: 'i' },
       }
     : {}
 
@@ -29,9 +27,18 @@ const getProducts = asyncHandler(async (req, res) => {
 // @route   GET /api/products/:id
 // @access  Public
 const getProductById = asyncHandler(async (req, res) => {
+  const cacheKey = `product:${req.params.id}`
+  const cached = await redisClient.get(cacheKey)
+
+  if (cached) {
+    console.log("Cache hit")
+    return res.json(JSON.parse(cached))
+  }
+
   const product = await Product.findById(req.params.id)
 
   if (product) {
+    await redisClient.set(cacheKey, JSON.stringify(product), { EX: 600 })
     res.json(product)
   } else {
     res.status(404)
@@ -46,7 +53,8 @@ const deleteProduct = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id)
 
   if (product) {
-    await product.remove()
+    await product.deleteOne()
+    await redisClient.del(`product:${req.params.id}`) // invalidate cache
     res.json({ message: 'Product removed' })
   } else {
     res.status(404)
@@ -59,15 +67,15 @@ const deleteProduct = asyncHandler(async (req, res) => {
 // @access  Private/Admin
 const createProduct = asyncHandler(async (req, res) => {
   const product = new Product({
-    name: 'Sample name',
-    price: 0,
+    name: req.body.name || 'Sample name',
+    price: req.body.price || 0,
     user: req.user._id,
-    image: '/images/sample.jpg',
-    brand: 'Sample brand',
-    category: 'Sample category',
-    countInStock: 0,
+    image: req.body.image || '/images/sample.jpg',
+    brand: req.body.brand || 'Sample brand',
+    category: req.body.category || 'Sample category',
+    countInStock: req.body.countInStock || 0,
     numReviews: 0,
-    description: 'Sample description',
+    description: req.body.description || 'Sample description',
   })
 
   const createdProduct = await product.save()
@@ -78,28 +86,24 @@ const createProduct = asyncHandler(async (req, res) => {
 // @route   PUT /api/products/:id
 // @access  Private/Admin
 const updateProduct = asyncHandler(async (req, res) => {
-  const {
-    name,
-    price,
-    description,
-    image,
-    brand,
-    category,
-    countInStock,
-  } = req.body
+  const { name, price, description, image, brand, category, countInStock } = req.body
 
   const product = await Product.findById(req.params.id)
 
   if (product) {
-    product.name = name
-    product.price = price
-    product.description = description
-    product.image = image
-    product.brand = brand
-    product.category = category
-    product.countInStock = countInStock
+    product.name = name || product.name
+    product.price = price || product.price
+    product.description = description || product.description
+    product.image = image || product.image
+    product.brand = brand || product.brand
+    product.category = category || product.category
+    product.countInStock = countInStock || product.countInStock
 
     const updatedProduct = await product.save()
+
+    // invalidate cache
+    await redisClient.del(`product:${req.params.id}`)
+
     res.json(updatedProduct)
   } else {
     res.status(404)
@@ -112,7 +116,6 @@ const updateProduct = asyncHandler(async (req, res) => {
 // @access  Private
 const createProductReview = asyncHandler(async (req, res) => {
   const { rating, comment } = req.body
-
   const product = await Product.findById(req.params.id)
 
   if (product) {
@@ -133,14 +136,16 @@ const createProductReview = asyncHandler(async (req, res) => {
     }
 
     product.reviews.push(review)
-
     product.numReviews = product.reviews.length
-
     product.rating =
       product.reviews.reduce((acc, item) => item.rating + acc, 0) /
       product.reviews.length
 
     await product.save()
+
+    // invalidate cache
+    await redisClient.del(`product:${req.params.id}`)
+
     res.status(201).json({ message: 'Review added' })
   } else {
     res.status(404)
@@ -153,7 +158,6 @@ const createProductReview = asyncHandler(async (req, res) => {
 // @access  Public
 const getTopProducts = asyncHandler(async (req, res) => {
   const products = await Product.find({}).sort({ rating: -1 }).limit(3)
-
   res.json(products)
 })
 
